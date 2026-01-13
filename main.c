@@ -3,14 +3,20 @@
  * vaguely following tsodings video: https://www.youtube.com/watch?v=sZ8GJ1TiMdk
  
     this program just uses one single heap of fixed size which can not be expanded
-    its a global variable
+    its kept as a global variable
     
     alignment is implemented as 8 byte aligned so standard for 64bit systems
 
     some edge cases are included:
         allocating a chunk of 0 bytes returns NULL, so is skipped essentially
         (malloc compared to this returns a unique ptr every call, just shifted 
-        0x30 off another, so it does allocate chunks but the data size is 0, i think) 
+        0x30 off another, so it does allocate chunks but the data size is 0, i think)
+*/
+
+/*
+    free inserts chunk into free list
+    free list is implicit in t_chunk (next free chunk) (singly linked list)
+    malloc scans only free blocks
 */
 
 #include <stdio.h>
@@ -19,111 +25,114 @@
 #include <stddef.h>
 #include <assert.h>
 
-#define HEAP_CAPACITY 640000 // 64kb
+#define HEAP_SIZE 640000 // 64kb
+#define D_SPLIT 100 // if 
 
-typedef struct s_heap_chunk
+typedef struct s_chunk
 {
-    // s_heap_chunk*   prev;
-    // s_heap_chunk*   next;
-    void*           start;
-    size_t          data_size;
+    size_t          size;
     bool            is_freed;
-} t_heap_chunk;
+    s_chunk*        next_chunk;
+} t_chunk;
 
-#define MAX_CHUNKS (int)(HEAP_CAPACITY / sizeof(t_heap_chunk))
+#define MAX_CHUNKS (int)(HEAP_SIZE / sizeof(t_chunk))
+#define ALIGN 8
 
-char heap[HEAP_CAPACITY] = {0};
-size_t heap_size = 0;
+_Alignas(8) static uint8_t heap[HEAP_SIZE];
+t_chunk* free_list_head = NULL;
 
-t_heap_chunk heap_alloced[MAX_CHUNKS] = {0}; // there are a max of HEAP_CAPACITY / sizeof(t_heap_chunk) 
-size_t heap_alloced_count = 0;
-
-void* heap_alloc(size_t requested_size)
+void heap_init(void)
 {
-    // 1 byte is the minimum size that can be allocated, resulting in an 8 byte chunk due to rounding it up for alignment
-    if (requested_size < 1) 
-        return NULL;
+    chunk_t* initial = (chunk_t*)heap;
 
-    size_t aligned_size = (requested_size + 7) & ~7; // 8-byte alignment
-                                                     
-    assert(heap_size + aligned_size <= HEAP_CAPACITY);
-    assert(heap_alloced_count < MAX_CHUNKS);
+    initial->size = HEAP_SIZE - sizeof(t_chunk),
+    initial->is_freed = true,
+    initial->next_free_chunk = NULL;
 
-    void* result = heap + heap_size; // current_heap_size
-    heap_size += aligned_size; // expand by size
-
-    // add metadata to the metadata struct array 
-    t_heap_chunk chunk = 
-    {
-        .start = result, 
-        .data_size = aligned_size,
-        .is_freed = false
-    };
-    heap_alloced[heap_alloced_count++] = chunk;
-
-    return result;
-}   
-
-void heap_dump_alloced_chunks()
-{
-    printf("Allocated Chunks: (%ld)\n", heap_alloced_count);
-    for (size_t i = 0; i < heap_alloced_count; ++i)
-    {
-        printf("start: %p, size: %ldbytes, %b\n", 
-                heap_alloced[i].start, 
-                heap_alloced[i].data_size, 
-                heap_alloced[i].is_freed);
-    }
+    free_list_head = initial;
 }
 
-void heap_free(void* ptr)
+void* heap_alloc(size_t size)
 {
-    // how do we know how much space this pointer allocated?
-    // find the struct with this ptr
-    for (size_t i = 0; i < heap_alloced_count; ++i)
+    if (size < 1)
+        return NULL;
+
+    t_chunk* prev = NULL;
+    t_chunk* curr = free_list_head;
+
+    size_t aligned_size = (size + ALIGN-1) & ~(ALIGN-1);
+
+    while (curr)
     {
-        if (heap_alloced[i].start == ptr)
+        if (curr->size >= aligned_size) // header in not included in curr-size its already allocated 
+                                        // so only check if splitting
         {
-            if (heap_alloced[i].is_freed)
+            // chunk is large enough, use this chunk
+            size_t alloc_size = aligned_size + sizeof(t_chunk) + ALIGN;
+            printf("heap_alloc: free chunk has size: %d, alloc_size: %d\n", 
+                    curr->size, alloc_size);
+
+            if (curr->size >= alloc_size)
             {
-                fprintf(stderr, "heap_free: chunks is already freed\n");
-                return;
+                // split
+                printf("SPLITTING\n");
+
+                // remove from free list
+                // need prev ptr
+                // next ptr
+
+                // add new chunk
+                // set head if there is no head
+
+                return (void*)(curr + 1); // user data address
+            }        
+            else
+            {
+                // allocate normally (not split)
+                printf("ALLOCATING NORMALLY\n");
+
+                // remove from free list
+                if (!prev)
+                {
+                    // set new head 
+                       
+                }
+                else
+                {
+                    // insert remove from free list
+
+                }
+
+                return (void*)(curr + 1); // user data address
             }
-
-            // free this chunk
-            heap_alloced[i].is_freed = 1;
-
-            // carefull to not go negative ! maybe there is an edge case
-            assert(heap_alloced_count > 0);
-            heap_alloced_count -= 1; 
-
-            // memset(heap_alloced[i].start, 1, heap_alloced[i].data_size); maybe reset is not necassary, just overwrite
-            
-            // remove the freed chunk from heap_alloced
-            memset(&heap_alloced[i], 0, sizeof(t_heap_chunk)); 
-
-            // remove the struct and move all remaining ones after that left by sizeof(t_heap_chunk)
-            // NOTE: pointer arithmetic already scales addresses of arrays with element size so its i+1
-            memmove(&heap_alloced[i], 
-                    &heap_alloced[i + 1], 
-                    (heap_alloced_count - (i+1)) * sizeof(t_heap_chunk));
-
-            return;
+        }
+        else
+        {
+            // ask next chunk
+            prev = curr;
+            curr = curr->next_chunk;
+            if (curr == NULL)
+            {
+                fprintf(stderr, "error, heap_alloc: no space left for chunk of: 
+                        %d, aligned: %d\n", size, aligned_size);
+                return NULL;
+            }
         }
     }
-    fprintf(stderr, "chunk is not in heap_alloced\n");
+
+    return NULL;
+}
+
+void free(void* ptr)
+{
+    
 }
 
 int main(void)
 {
-    for (size_t i = 0; i < 100; ++i)
-    {
-        void* c = heap_alloc(i);
-        if (i % 2 == 0)
-            heap_free(c);
-    }
+    heap_init();
 
-    heap_dump_alloced_chunks();
+    void* root = heap_alloc(69);
 
     return 0;
 }
