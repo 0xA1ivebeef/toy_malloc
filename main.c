@@ -20,19 +20,21 @@
 */
 
 #include <stdio.h>
-#include <string.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
+#include <string.h>
 #include <assert.h>
 
-#define HEAP_SIZE 640000 // 64kb
-#define D_SPLIT 100 // if 
+#define HEAP_SIZE 64000 // 64kb
+#define TOLERATE_DIFF 100 // upbound size in bytes to determine if a free chunk should be used
+// (chunks that are <100 bytes larger than the requested size + metadata will be used normally and not split)
 
 typedef struct s_chunk
 {
-    size_t          size;
-    bool            is_freed;
-    s_chunk*        next_chunk;
+    size_t          	size;
+    bool            	is_freed;
+    struct s_chunk*     next_free;
 } t_chunk;
 
 #define MAX_CHUNKS (int)(HEAP_SIZE / sizeof(t_chunk))
@@ -43,18 +45,29 @@ t_chunk* free_list_head = NULL;
 
 void heap_init(void)
 {
-    chunk_t* initial = (chunk_t*)heap;
+    t_chunk* initial = (t_chunk*)heap;
 
     initial->size = HEAP_SIZE - sizeof(t_chunk),
     initial->is_freed = true,
-    initial->next_free_chunk = NULL;
+    initial->next_free = NULL;
 
     free_list_head = initial;
 }
 
+void print_free_list() 
+{
+    t_chunk* c = free_list_head;
+    printf("Free list:\n");
+    while (c) 
+	{
+        printf("  chunk %p size %ld\n", c, c->size);
+        c = c->next_free;
+    }
+}
+
 void* heap_alloc(size_t size)
 {
-    if (size < 1)
+    if (size == 0)
         return NULL;
 
     t_chunk* prev = NULL;
@@ -64,76 +77,121 @@ void* heap_alloc(size_t size)
 
     while (curr)
     {
-        if (curr->size >= aligned_size) // header in not included in curr-size its already allocated 
-                                        // so only check if splitting
+		if (curr->size < aligned_size) // chunk too small, ask next chunk
         {
-            // chunk is large enough, use this chunk
-            size_t alloc_size = aligned_size + sizeof(t_chunk) + ALIGN;
-            printf("heap_alloc: free chunk has size: %d, alloc_size: %d\n", 
-                    curr->size, alloc_size);
-
-            if (curr->size >= alloc_size)
-            {
-                // split
-                printf("SPLITTING\n");
-
-                // remove from free list
-                // need prev ptr
-                // next ptr
-
-                // add new chunk
-                // set head if there is no head
-
-                return (void*)(curr + 1); // user data address
-            }        
-            else
-            {
-                // allocate normally (not split)
-                printf("ALLOCATING NORMALLY\n");
-
-                // remove from free list
-                if (!prev)
-                {
-                    // set new head 
-                       
-                }
-                else
-                {
-                    // insert remove from free list
-
-                }
-
-                return (void*)(curr + 1); // user data address
-            }
-        }
-        else
-        {
-            // ask next chunk
+			printf("asking for next chunk current size: %ld, aligned size: %ld\n", curr->size, aligned_size);
             prev = curr;
-            curr = curr->next_chunk;
-            if (curr == NULL)
-            {
-                fprintf(stderr, "error, heap_alloc: no space left for chunk of: 
-                        %d, aligned: %d\n", size, aligned_size);
-                return NULL;
-            }
-        }
-    }
+            curr = curr->next_free;
+			continue;
+		} 
 
-    return NULL;
+        size_t alloc_size = aligned_size + sizeof(t_chunk) + ALIGN;
+        printf("heap_alloc: free chunk has size: %ld, alloc_size: %ld\n", curr->size, alloc_size);
+
+        if (curr->size < alloc_size + TOLERATE_DIFF)
+        {
+			// allocate normally (not split)
+            printf("ALLOCATING NORMALLY\n");
+			curr->is_freed = false;
+
+			// update free list
+            if (!prev)
+ 				free_list_head = curr->next_free; // becomes NULL if no chunks left
+            else
+				prev->next_free = curr->next_free; // insert and remove from free list
+				
+			curr->next_free = NULL; // remove from free list 
+
+            return (void*)(curr + 1); // user data address
+		}
+        
+        printf("SPLITTING\n");
+
+		curr->is_freed = false; // remove from free list
+
+		size_t remaining = curr->size - aligned_size - sizeof(t_chunk); // other half of the chunk that is split
+
+		t_chunk* split = (t_chunk*)((uint8_t*)(curr + 1) + aligned_size);
+    	split->size = remaining;
+    	split->is_freed = true;
+    	split->next_free = curr->next_free;
+
+		printf("split new free chunk: size %ld\n", split->size);
+		if (!prev)
+		{
+    		free_list_head = split;
+			printf("updated free list head to: %p\n", free_list_head);
+		}
+		else
+		{
+			prev->next_free = split; // insert
+		}
+
+		curr->size = aligned_size;
+		curr->next_free = NULL;
+
+        return (void*)(curr + 1); // user data address
+	}
+
+	fprintf(stderr, "ERROR: heap_alloc no free chunks left\n");
+	return NULL;
 }
 
-void free(void* ptr)
+void heap_free(void* ptr)
 {
-    
+	if (!ptr)
+	{
+		fprintf(stderr, "ERROR: heap_free called with NULL\n");
+		return;
+	}
+
+    // append to free list (maybe sorted by addresses?)
+	// free ptr user data
+	t_chunk* this_chunk = (t_chunk*)(ptr) - 1;
+	this_chunk->is_freed = true;
+
+	// insert to free_list
+	this_chunk->next_free = free_list_head;
+	free_list_head = this_chunk;
 }
 
 int main(void)
 {
     heap_init();
+	/*
+    char* root = (char*)heap_alloc(64000-100);
 
-    void* root = heap_alloc(69);
+	for (int i = 0; i < 26; ++i)
+	{
+		root[i] = 'A' + i;
+	}
+	printf("root: %s\n", root);
+	heap_free(root);
+	
+	printf("root after first free: %s\n", root);
+    root = heap_alloc(64000-100);
+	
+	for (int i = 0; i < 26; ++i)
+	{
+		root[i] = 'A' + i;
+	}
+	printf("root: %s\n", root);
+	heap_free(root);
 
+	printf("root after second free: %s\n", root);
+	*/
+	print_free_list();
+	char* root1 = heap_alloc(64000-100);
+	heap_free(root1);
+
+	print_free_list();
+	char* root2 = heap_alloc(64000-100);
+
+	// Assert the allocator returned a **valid pointer inside heap**
+	assert(root2 >= (char*)heap && root2 < (char*)heap + HEAP_SIZE);
+	heap_free(root2);
+	print_free_list();
+	
     return 0;
 }
 
